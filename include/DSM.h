@@ -156,6 +156,7 @@ private:
   static thread_local uint64_t thread_tag;
 
   uint64_t baseAddr;
+  uint64_t onchip;
   uint32_t myNodeID;
 
   RemoteConnection *remoteInfo;

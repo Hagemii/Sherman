@@ -32,6 +32,8 @@ DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
 
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
+  onchip = (uint64_t)hugePageAlloc(256 * define::MB);
+
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
   Debug::notifyInfo("cache size: %dGB", conf.cacheConfig.cacheSize);
@@ -42,7 +44,10 @@ DSM::DSM(const DSMConfig &conf)
        i += 2 * define::MB) {
     *(char *)i = 0;
   }
-
+  for (uint64_t i = onchip; i < onchip + 256 * define::MB;
+       i += 2 * define::MB) {
+    *(char *)i = 0;
+  }
   // clear up first chunk
   memset((char *)baseAddr, 0, define::kChunkSize);
 
@@ -99,7 +104,7 @@ void DSM::initRDMAConnection() {
 
   for (int i = 0; i < NR_DIRECTORY; ++i) {
     dirCon[i] =
-        new DirectoryConnection(i, (void *)baseAddr, conf.dsmSize * define::GB,
+        new DirectoryConnection(i, (void *)baseAddr,(void *)onchip, conf.dsmSize * define::GB,
                                 conf.machineNR, remoteInfo);
   }
 
