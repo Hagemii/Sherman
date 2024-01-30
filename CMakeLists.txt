@@ -10,7 +10,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=c++11 -Wno-error=address")
 
 
 # Link Options
-set(LINKS_FLAGS "-lcityhash -lboost_system -lboost_coroutine -lpthread -libverbs -lmemcached")
+set(LINKS_FLAGS "-lcityhash -lboost_system -lboost_coroutine -lpthread -libverbs -lmemcached -ltbb")
 
 set(INCLUDE_BASE ${PROJECT_SOURCE_DIR}/include)
 include_directories(${INCLUDE_BASE})

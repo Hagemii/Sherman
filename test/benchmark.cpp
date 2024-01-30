@@ -1,6 +1,7 @@
 #include "Timer.h"
 #include "Tree.h"
-#include "zipf.h"
+// #include "zipf.h"                // Sherman的zipf数据生成器
+#include "ScrambledZipfGenerator.h" // Scalestore的zipf数据生成器
 
 #include <city.h>
 #include <stdlib.h>
@@ -20,7 +21,7 @@ int kThreadCount;
 int kNodeCount;
 uint64_t kKeySpace = 1 * define::MB;
 double kWarmRatio = 0.8;
-double zipfan = 0;
+double zipfan = 0.99;
 
 //////////////////// workload parameters /////////////////////
 
@@ -28,7 +29,8 @@ double zipfan = 0;
 extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
 
-
+extern uint64_t value_cache_miss[MAX_APP_THREAD][8];
+extern uint64_t value_cache_hit[MAX_APP_THREAD][8];
 
 std::thread th[MAX_APP_THREAD];
 uint64_t tp[MAX_APP_THREAD][8];
@@ -41,42 +43,6 @@ DSM *dsm;
 
 inline Key to_key(uint64_t k) {
   return (CityHash64((char *)&k, sizeof(k)) + 1) % kKeySpace;
-}
-
-class RequsetGenBench : public RequstGen {
-
-public:
-  RequsetGenBench(int coro_id, DSM *dsm, int id)
-      : coro_id(coro_id), dsm(dsm), id(id) {
-    seed = rdtsc();
-    mehcached_zipf_init(&state, kKeySpace, zipfan,
-                        (rdtsc() & (0x0000ffffffffffffull)) ^ id);
-  }
-
-  Request next() override {
-    Request r;
-    uint64_t dis = mehcached_zipf_next(&state);
-
-    r.k = to_key(dis);
-    r.v = 23;
-    r.is_search = rand_r(&seed) % 100 < kReadRatio;
-
-    tp[id][0]++;
-
-    return r;
-  }
-
-private:
-  int coro_id;
-  DSM *dsm;
-  int id;
-
-  unsigned int seed;
-  struct zipf_gen_state state;
-};
-
-RequstGen *coro_func(int coro_id, DSM *dsm, int id) {
-  return new RequsetGenBench(coro_id, dsm, id);
 }
 
 Timer bench_timer;
@@ -132,21 +98,21 @@ void thread_run(int id) {
 
   /// without coro
   unsigned int seed = rdtsc();
-  struct zipf_gen_state state;
-  mehcached_zipf_init(&state, kKeySpace, zipfan,
-                      (rdtsc() & (0x0000ffffffffffffull)) ^ id);
+  
+  ScrambledZipfGenerator zipf_random(0, kKeySpace,zipfan);
+  
 
   Timer timer;
   while (true) {
-
-    uint64_t dis = mehcached_zipf_next(&state);
+    uint64_t dis = zipf_random.rand();
+  
     uint64_t key = to_key(dis);
 
     Value v;
     timer.begin();
 
     if (rand_r(&seed) % 100 < kReadRatio) { // GET
-      tree->search(key, v);
+      tree->search_test(key, v);
     } else {
       v = 12;
       tree->insert(key, v);
@@ -271,9 +237,19 @@ int main(int argc, char *argv[]) {
 
     uint64_t all = 0;
     uint64_t hit = 0;
+    uint64_t miss = 0;
+
+    uint64_t value_all = 0;
+    uint64_t value_hit = 0;
+    uint64_t value_miss = 0;
+
     for (int i = 0; i < MAX_APP_THREAD; ++i) {
       all += (cache_hit[i][0] + cache_miss[i][0]);
       hit += cache_hit[i][0];
+      miss += cache_miss[i][0];
+      value_all += (value_cache_hit[i][0] + value_cache_miss[i][0]);
+      value_hit += value_cache_hit[i][0];
+      value_miss += value_cache_miss[i][0];
     }
 
     clock_gettime(CLOCK_REALTIME, &s);
@@ -289,7 +265,11 @@ int main(int argc, char *argv[]) {
 
     if (dsm->getMyNodeID() == 0) {
       printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
-      printf("cache hit rate: %lf\n", hit * 1.0 / all);
+      printf("index_cache hit rate: %lf\n", hit * 1.0 / all);
+      printf("index_cache miss rate: %lf\n", miss * 1.0 / all);
+      printf("value_cache hit rate: %lf\n", value_hit * 1.0 / value_all);
+      printf("value_cache miss rate: %lf\n", value_miss * 1.0 / value_all);
+
     }
   }
 

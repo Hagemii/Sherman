@@ -13,7 +13,7 @@ ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
   // rpc_cq = cq;
   rpc_cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
 
-  message = new RawMessageConnection(ctx, rpc_cq, APP_MESSAGE_NR);
+  message = new RawMessageConnection(ctx, rpc_cq, APP_MESSAGE_NR);  // rpc消息
 
   this->cachePool = cachePool;
   cacheMR = createMemoryRegion((uint64_t)cachePool, cacheSize, &ctx);

@@ -32,7 +32,7 @@ DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
 
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
-  onchip = (uint64_t)hugePageAlloc(256 * define::MB);
+  onchip = (uint64_t)hugePageAlloc(0.25 * define::MB);
 
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
@@ -44,7 +44,7 @@ DSM::DSM(const DSMConfig &conf)
        i += 2 * define::MB) {
     *(char *)i = 0;
   }
-  for (uint64_t i = onchip; i < onchip + 256 * define::MB;
+  for (uint64_t i = onchip; i < onchip + 0.25 * define::MB;
        i += 2 * define::MB) {
     *(char *)i = 0;
   }
@@ -96,12 +96,14 @@ void DSM::initRDMAConnection() {
 
   remoteInfo = new RemoteConnection[conf.machineNR];
 
+// CNs rdma层、cache大小设置
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
     thCon[i] =
         new ThreadConnection(i, (void *)cache.data, cache.size * define::GB,
                              conf.machineNR, remoteInfo);
   }
 
+// MNs rdma层、内存池、ON-chip锁
   for (int i = 0; i < NR_DIRECTORY; ++i) {
     dirCon[i] =
         new DirectoryConnection(i, (void *)baseAddr,(void *)onchip, conf.dsmSize * define::GB,

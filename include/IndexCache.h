@@ -151,7 +151,8 @@ inline const CacheEntry *IndexCache::search_from_cache(const Key &k,
   auto entry = find_entry(k);
 
   InternalPage *page = entry ? entry->ptr : nullptr;
-
+  
+  //遍历entry，找到最合适的叶子指针
   if (page && entry->from <= k && entry->to >= k) {
 
     page->index_cache_freq++;

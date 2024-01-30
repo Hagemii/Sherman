@@ -38,7 +38,7 @@
 #define RAW_RECV_CQ_COUNT 128
 
 // { app thread
-#define MAX_APP_THREAD 1
+#define MAX_APP_THREAD 12
 
 #define APP_MESSAGE_NR 96
 
@@ -101,6 +101,7 @@ constexpr int64_t kPerCoroRdmaBuf = 128 * 1024;
 constexpr uint8_t kMaxHandOverTime = 8;
 
 constexpr int kIndexCacheSize = 1000; // MB
+constexpr int kValueCachenum = 100000;
 } // namespace define
 
 static inline unsigned long long asm_rdtsc(void) {
