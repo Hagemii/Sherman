@@ -8,7 +8,6 @@ ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
     : threadID(threadID), remoteInfo(remoteInfo) {
   createContext(&ctx);
 
-
   cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
   // rpc_cq = cq;
   rpc_cq = ibv_create_cq(ctx.ctx, RAW_RECV_CQ_COUNT, NULL, NULL, 0);
@@ -30,7 +29,7 @@ ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
 
 void ThreadConnection::sendMessage2Dir(RawMessage *m, uint16_t node_id,
                                        uint16_t dir_id) {
-  
+
   message->sendRawMessage(m, remoteInfo[node_id].dirMessageQPN[dir_id],
                           remoteInfo[node_id].appToDirAh[threadID][dir_id]);
 }

@@ -29,7 +29,7 @@ bool Keeper::connectMemcached() {
   memcached_server_st *servers = NULL;
   memcached_return rc;
 
-  std::ifstream conf("../memcached.conf");
+  std::ifstream conf("/home/liujibo/Sherman/memcached.conf");
 
   if (!conf) {
     fprintf(stderr, "can't open memcached.conf\n");
@@ -75,7 +75,7 @@ void Keeper::serverEnter() {
 
       myNodeID = serverNum - 1;
 
-      printf("I am server %d\n", myNodeID);
+      printf("   I am server %d\n", myNodeID);
       return;
     }
     fprintf(stderr, "Server %d Counld't incr value and get ID: %s, retry...\n",
@@ -105,7 +105,7 @@ void Keeper::serverConnect() {
     for (size_t k = curServer; k < serverNum; ++k) {
       if (k != myNodeID) {
         connectNode(k);
-        printf("I connect server %zu\n", k);
+        printf("I connect server %zu\n\n", k);
       }
     }
     curServer = serverNum;
@@ -144,7 +144,7 @@ char *Keeper::memGet(const char *key, uint32_t klen, size_t *v_size) {
   if (v_size != nullptr) {
     *v_size = l;
   }
-  
+
   return res;
 }
 

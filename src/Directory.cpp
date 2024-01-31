@@ -2,6 +2,7 @@
 #include "Common.h"
 
 #include "Connection.h"
+#include <cstdio>
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
@@ -27,8 +28,8 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  bindCore(23 - dirID);
-  Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
+  bindCore(7 - dirID);
+  printf("   thread %d in memory nodes runs...\n", dirID);
 
   while (true) {
     struct ibv_wc wc;

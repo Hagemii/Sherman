@@ -31,13 +31,14 @@ DSM *DSM::getInstance(const DSMConfig &conf) {
 DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
 
+  printf("------------------------------------------------ 创建DSM实例\n");
+
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
   onchip = (uint64_t)hugePageAlloc(256 * define::MB);
 
-
-  Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
-  Debug::notifyInfo("cache size: %dGB", conf.cacheConfig.cacheSize);
-
+  printf("分配 shared memory size: %dGB, 0x%lx\n", conf.dsmSize, baseAddr);
+  printf("分配 cache size:         %dGB\n", conf.cacheConfig.cacheSize);
+  printf("分配 onchip size:        256 MB\n\n");
   // warmup
   // memset((char *)baseAddr, 0, conf.dsmSize * define::GB);
   for (uint64_t i = baseAddr; i < baseAddr + conf.dsmSize * define::GB;
@@ -53,13 +54,15 @@ DSM::DSM(const DSMConfig &conf)
 
   initRDMAConnection();
 
-  Debug::notifyInfo("number of threads on memory node: %d", NR_DIRECTORY);
+  printf("New Directory\n");
+  printf("   number of threads on memory node: %d\n", NR_DIRECTORY);
   for (int i = 0; i < NR_DIRECTORY; ++i) {
     dirAgent[i] =
         new Directory(dirCon[i], remoteInfo, conf.machineNR, i, myNodeID);
   }
 
   keeper->barrier("DSM-init");
+  printf("------------------------------------------------ 创建DSM实例完毕\n");
 }
 
 DSM::~DSM() {}
@@ -92,25 +95,30 @@ void DSM::registerThread() {
 
 void DSM::initRDMAConnection() {
 
-  Debug::notifyInfo("number of servers (colocated MN/CN): %d", conf.machineNR);
+  printf("------init RDMA Connection------\n");
+  printf("server(colocated MN/CN) 数量: %d\n", conf.machineNR);
 
   remoteInfo = new RemoteConnection[conf.machineNR];
 
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
+    printf("new ThreadConnection\n");
     thCon[i] =
         new ThreadConnection(i, (void *)cache.data, cache.size * define::GB,
                              conf.machineNR, remoteInfo);
   }
 
   for (int i = 0; i < NR_DIRECTORY; ++i) {
-    dirCon[i] =
-        new DirectoryConnection(i, (void *)baseAddr,(void *)onchip, conf.dsmSize * define::GB,
-                                conf.machineNR, remoteInfo);
+    printf("new DirectoryConnection\n");
+    dirCon[i] = new DirectoryConnection(i, (void *)baseAddr, (void *)onchip,
+                                        conf.dsmSize * define::GB,
+                                        conf.machineNR, remoteInfo);
   }
 
+  printf("new DSMKeeper\n");
   keeper = new DSMKeeper(thCon, dirCon, remoteInfo, conf.machineNR);
 
   myNodeID = keeper->getMyNodeID();
+  printf("------finish init RDMA Connection------\n\n");
 }
 
 void DSM::read(char *buffer, GlobalAddress gaddr, size_t size, bool signal,

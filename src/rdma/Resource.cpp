@@ -1,10 +1,11 @@
 #include "Rdma.h"
+#include <arpa/inet.h>
 #include <inttypes.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
+
+// 函数定义时，默认 port=1; gidIndex=1; devIndex=0
 bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
-                   uint8_t devIndex)
-{
+                   uint8_t devIndex) {
 
   ibv_device *dev = NULL;
   ibv_context *ctx = NULL;
@@ -14,32 +15,27 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
   // get device names in the system
   int devicesNum;
   struct ibv_device **deviceList = ibv_get_device_list(&devicesNum);
-  if (!deviceList)
-  {
+  if (!deviceList) {
     Debug::notifyError("failed to get IB devices list");
     goto CreateResourcesExit;
   }
 
   // if there isn't any IB device in host
-  if (!devicesNum)
-  {
+  if (!devicesNum) {
     Debug::notifyInfo("found %d device(s)", devicesNum);
     goto CreateResourcesExit;
   }
   // Debug::notifyInfo("Open IB Device");
 
-  for (int i = 0; i < devicesNum; ++i)
-  {
+  for (int i = 0; i < devicesNum; ++i) {
     // printf("Device %d: %s\n", i, ibv_get_device_name(deviceList[i]));
-    if (ibv_get_device_name(deviceList[i])[5] == 'rxe_0')
-    {
+    if (ibv_get_device_name(deviceList[i])[5] == 'rxe_0') {
       devIndex = i;
       break;
     }
   }
 
-  if (devIndex >= devicesNum)
-  {
+  if (devIndex >= devicesNum) {
     Debug::notifyError("ib device wasn't found");
     goto CreateResourcesExit;
   }
@@ -49,8 +45,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   // get device handle
   ctx = ibv_open_device(dev);
-  if (!ctx)
-  {
+  if (!ctx) {
     Debug::notifyError("failed to open device");
     goto CreateResourcesExit;
   }
@@ -59,8 +54,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
   deviceList = NULL;
 
   // query port properties
-  if (ibv_query_port(ctx, port, &portAttr))
-  {
+  if (ibv_query_port(ctx, port, &portAttr)) {
     Debug::notifyError("ibv_query_port failed");
     goto CreateResourcesExit;
   }
@@ -68,22 +62,20 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
   // allocate Protection Domain
   // Debug::notifyInfo("Allocate Protection Domain");
   pd = ibv_alloc_pd(ctx);
-  if (!pd)
-  {
+  if (!pd) {
     Debug::notifyError("ibv_alloc_pd failed");
     goto CreateResourcesExit;
   }
 
-  if (ibv_query_gid(ctx, port, gidIndex, &context->gid))
-  {
+  if (ibv_query_gid(ctx, port, gidIndex, &context->gid)) {
     Debug::notifyError("could not get gid for port: %d, gidIndex: %d", port,
                        gidIndex);
     goto CreateResourcesExit;
   }
-  char			 gid[33];
+  char gid[33];
   inet_ntop(AF_INET6, &context->gid, gid, sizeof gid);
 
-	printf("   GID %s\n",gid);
+  printf("   GID %s\n", gid);
 
   // Success :)
   context->devIndex = devIndex;
@@ -94,8 +86,7 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
   context->lid = portAttr.lid;
 
   // check device memory support
-  if (kMaxDeviceMemorySize == 0)
-  {
+  if (kMaxDeviceMemorySize == 0) {
     // checkDMSupported(ctx);
   }
 
@@ -105,18 +96,15 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 CreateResourcesExit:
   Debug::notifyError("Error Encountered, Cleanup ...");
 
-  if (pd)
-  {
+  if (pd) {
     ibv_dealloc_pd(pd);
     pd = NULL;
   }
-  if (ctx)
-  {
+  if (ctx) {
     ibv_close_device(ctx);
     ctx = NULL;
   }
-  if (deviceList)
-  {
+  if (deviceList) {
     ibv_free_device_list(deviceList);
     deviceList = NULL;
   }
@@ -124,21 +112,16 @@ CreateResourcesExit:
   return false;
 }
 
-bool destoryContext(RdmaContext *context)
-{
+bool destoryContext(RdmaContext *context) {
   bool rc = true;
-  if (context->pd)
-  {
-    if (ibv_dealloc_pd(context->pd))
-    {
+  if (context->pd) {
+    if (ibv_dealloc_pd(context->pd)) {
       Debug::notifyError("Failed to deallocate PD");
       rc = false;
     }
   }
-  if (context->ctx)
-  {
-    if (ibv_close_device(context->ctx))
-    {
+  if (context->ctx) {
+    if (ibv_close_device(context->ctx)) {
       Debug::notifyError("failed to close device context");
       rc = false;
     }
@@ -147,16 +130,14 @@ bool destoryContext(RdmaContext *context)
   return rc;
 }
 
-ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx)
-{
+ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx) {
 
   ibv_mr *mr = NULL;
   mr = ibv_reg_mr(ctx->pd, (void *)mm, mmSize,
                   IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
                       IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC);
 
-  if (!mr)
-  {
+  if (!mr) {
     Debug::notifyError("Memory registration failed");
   }
 
@@ -194,7 +175,6 @@ ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx)
 //     return nullptr;
 //   }
 
-
 //   // init zero
 //   char *buffer = (char *)malloc(mmSize);
 //   memset(buffer, 0, mmSize);
@@ -214,27 +194,22 @@ ibv_mr *createMemoryRegion(uint64_t mm, uint64_t mmSize, RdmaContext *ctx)
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
                      ibv_cq *recv_cq, RdmaContext *context,
-                     uint32_t qpsMaxDepth, uint32_t maxInlineData)
-{
+                     uint32_t qpsMaxDepth, uint32_t maxInlineData) {
 
   struct ibv_qp_init_attr_ex attr;
   memset(&attr, 0, sizeof(attr));
 
-  //attr.qp_type = mode;
+  // attr.qp_type = mode;
   attr.sq_sig_all = 0;
   attr.pd = context->pd;
   attr.send_cq = send_cq;
   attr.recv_cq = recv_cq;
   attr.qp_type = mode;
 
-  if (mode == IBV_QPT_RC)
-  {
-    attr.comp_mask |= IBV_QP_INIT_ATTR_PD |
-						  IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-    //attr.max_atomic_arg = 32;
-  }
-  else
-  {
+  if (mode == IBV_QPT_RC) {
+    attr.comp_mask |= IBV_QP_INIT_ATTR_PD | IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
+    // attr.max_atomic_arg = 32;
+  } else {
     attr.comp_mask = IBV_QP_INIT_ATTR_PD;
   }
 
@@ -244,10 +219,9 @@ bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
   attr.cap.max_recv_sge = 1;
   attr.cap.max_inline_data = maxInlineData;
   attr.send_ops_flags = IBV_QP_EX_WITH_SEND;
-  
+
   *qp = ibv_create_qp_ex(context->ctx, &attr);
-  if (!(*qp))
-  {
+  if (!(*qp)) {
     Debug::notifyError("Failed to create QP");
     return false;
   }
@@ -259,8 +233,7 @@ bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *send_cq,
 
 bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *cq,
                      RdmaContext *context, uint32_t qpsMaxDepth,
-                     uint32_t maxInlineData)
-{
+                     uint32_t maxInlineData) {
   return createQueuePair(qp, mode, cq, cq, context, qpsMaxDepth, maxInlineData);
 }
 
@@ -304,8 +277,7 @@ bool createQueuePair(ibv_qp **qp, ibv_qp_type mode, ibv_cq *cq,
 // }
 
 void fillAhAttr(ibv_ah_attr *attr, uint32_t remoteLid, uint8_t *remoteGid,
-                RdmaContext *context)
-{
+                RdmaContext *context) {
 
   (void)remoteGid;
 

@@ -9,7 +9,6 @@
 #include <unistd.h>
 #include <vector>
 
-
 //////////////////// workload parameters /////////////////////
 
 // #define USE_CORO
@@ -24,11 +23,8 @@ double zipfan = 0;
 
 //////////////////// workload parameters /////////////////////
 
-
 extern uint64_t cache_miss[MAX_APP_THREAD][8];
 extern uint64_t cache_hit[MAX_APP_THREAD][8];
-
-
 
 std::thread th[MAX_APP_THREAD];
 uint64_t tp[MAX_APP_THREAD][8];
@@ -161,7 +157,6 @@ void thread_run(int id) {
     tp[id][0]++;
   }
 #endif
-
 }
 
 void parse_args(int argc, char *argv[]) {
@@ -174,8 +169,8 @@ void parse_args(int argc, char *argv[]) {
   kReadRatio = atoi(argv[2]);
   kThreadCount = atoi(argv[3]);
 
-  printf("kNodeCount %d, kReadRatio %d, kThreadCount %d\n", kNodeCount,
-         kReadRatio, kThreadCount);
+  printf("解析命令行参数: kNodeCount %d, kReadRatio %d, kThreadCount %d\n",
+         kNodeCount, kReadRatio, kThreadCount);
 }
 
 void cal_latency() {
@@ -262,6 +257,7 @@ int main(int argc, char *argv[]) {
     int microseconds = (e.tv_sec - s.tv_sec) * 1000000 +
                        (double)(e.tv_nsec - s.tv_nsec) / 1000;
 
+    // 计算吞吐量，tp只有1个线程，即MAX_APP_THREAD？
     uint64_t all_tp = 0;
     for (int i = 0; i < kThreadCount; ++i) {
       all_tp += tp[i][0];
@@ -269,6 +265,7 @@ int main(int argc, char *argv[]) {
     uint64_t cap = all_tp - pre_tp;
     pre_tp = all_tp;
 
+    // 计算cache命中率，这里只有一个线程，即MAX_APP_THREAD？
     uint64_t all = 0;
     uint64_t hit = 0;
     for (int i = 0; i < MAX_APP_THREAD; ++i) {

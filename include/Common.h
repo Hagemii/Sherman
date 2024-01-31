@@ -38,6 +38,7 @@
 #define RAW_RECV_CQ_COUNT 128
 
 // { app thread
+// 原来是26
 #define MAX_APP_THREAD 1
 
 #define APP_MESSAGE_NR 96
@@ -88,8 +89,8 @@ constexpr uint64_t kLockStartAddr = 0;
 constexpr uint64_t kLockChipMemSize = 256 * 1024;
 
 // number of locks
-// we do not use 16-bit locks, since 64-bit locks can provide enough concurrency.
-// if you want to use 16-bit locks, call *cas_dm_mask*
+// we do not use 16-bit locks, since 64-bit locks can provide enough
+// concurrency. if you want to use 16-bit locks, call *cas_dm_mask*
 constexpr uint64_t kNumOfLock = kLockChipMemSize / sizeof(uint64_t);
 
 // level of tree
@@ -116,7 +117,8 @@ constexpr Key kKeyMin = std::numeric_limits<Key>::min();
 constexpr Key kKeyMax = std::numeric_limits<Key>::max();
 constexpr Value kValueNull = 0;
 
-// Note: our RNICs can read 1KB data in increasing address order (but not for 4KB)
+// Note: our RNICs can read 1KB data in increasing address order (but not for
+// 4KB)
 constexpr uint32_t kInternalPageSize = 1024;
 constexpr uint32_t kLeafPageSize = 1024;
 

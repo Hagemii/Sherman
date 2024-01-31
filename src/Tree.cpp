@@ -468,7 +468,7 @@ uint64_t Tree::range_query(const Key &from, const Key &to, Value *value_buffer,
   result.clear();
   leaves.clear();
   index_cache->search_range_from_cache(from, to, result);
-  
+
   // FIXME: here, we assume all innernal nodes are cached in compute node
   if (result.empty()) {
     return 0;
@@ -613,7 +613,7 @@ re_read:
 
   if (result.is_leaf) {
     auto page = (LeafPage *)page_buffer;
-    if (!page->check_consistent()) {
+    if (!page->check_consistent()) { // page 读取一致性检查
       goto re_read;
     }
 
@@ -622,7 +622,7 @@ re_read:
       return false;
     }
 
-    assert(result.level == 0);
+    assert(result.level == 0);    // 叶子节点的 level 必须是0
     if (k >= page->hdr.highest) { // should turn right
       result.slibing = page->hdr.sibling_ptr;
       return true;
@@ -876,7 +876,7 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   int empty_index = -1;
   char *update_addr = nullptr;
   for (int i = 0; i < kLeafCardinality; ++i) {
-
+    // 遍历叶子节点，寻找空的 entry slot 或者检查是否需要 update
     auto &r = page->records[i];
     if (r.value != kValueNull) {
       cnt++;
@@ -927,34 +927,34 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   Key split_key;
   GlobalAddress sibling_addr;
-  if (need_split) { // need split
-    sibling_addr = dsm->alloc(kLeafPageSize);
-    auto sibling_buf = rbuf.get_sibling_buffer();
 
+  if (need_split) {
+    sibling_addr = dsm->alloc(kLeafPageSize); // 分配新的叶子节点的远程全局地址
+    auto sibling_buf = rbuf.get_sibling_buffer();
     auto sibling = new (sibling_buf) LeafPage(page->hdr.level);
 
-    // std::cout << "addr " <<  sibling_addr << " | level " <<
-    // (int)(page->hdr.level) << std::endl;
-
+    // 确定 split_key
     int m = cnt / 2;
     split_key = page->records[m].key;
     assert(split_key > page->hdr.lowest);
     assert(split_key < page->hdr.highest);
 
-    for (int i = m; i < cnt; ++i) { // move
+    // 在两个叶子节点之间移动数据
+    for (int i = m; i < cnt; ++i) {
       sibling->records[i - m].key = page->records[i].key;
       sibling->records[i - m].value = page->records[i].value;
       page->records[i].key = 0;
       page->records[i].value = kValueNull;
     }
+
+    // 修改两个叶子节点的 header 信息
     page->hdr.last_index -= (cnt - m);
     sibling->hdr.last_index += (cnt - m);
-
     sibling->hdr.lowest = split_key;
     sibling->hdr.highest = page->hdr.highest;
     page->hdr.highest = split_key;
 
-    // link
+    // link （都是远程全局地址）
     sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
     page->hdr.sibling_ptr = sibling_addr;
 
@@ -963,7 +963,6 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   }
 
   page->set_consistent();
-
   write_page_and_unlock(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                         lock_addr, tag, cxt, coro_id, need_split);
 
@@ -979,10 +978,12 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
 
   auto up_level = path_stack[coro_id][level + 1];
 
-  if (up_level != GlobalAddress::Null()) {
+  if (up_level !=
+      GlobalAddress::Null()) { // 如果没有走cache，直接找到父节点，并插入
+                               // internal entry
     internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
                         coro_id);
-  } else {
+  } else { // 如果走的是cache
     assert(from_cache);
     insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
   }
