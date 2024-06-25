@@ -122,7 +122,8 @@ bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
 bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
                         uint64_t compare, uint64_t swap, uint32_t lkey,
                         uint32_t remoteRKey, bool signal = true,
-                        uint64_t wrID = 0);
+                        uint64_t wrID = 0,
+                        uint64_t size = 8);
 bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
                             uint64_t compare, uint64_t swap, uint32_t lkey,
                             uint32_t remoteRKey, uint64_t mask = ~(0ull),

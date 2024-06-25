@@ -1,19 +1,29 @@
 #include "Tree.h"
+#include "Common.h"
+#include "GlobalAddress.h"
 #include "IndexCache.h"
+#include "Directory.h"
+
+#include "Rdma.h"
 #include "RdmaBuffer.h"
 #include "Timer.h"
 
 #include <algorithm>
 #include <city.h>
+#include <cstdint>
 #include <iostream>
+#include <netinet/in.h>
 #include <queue>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 bool enter_debug = false;
 
 uint64_t cache_miss[MAX_APP_THREAD][8];
 uint64_t cache_hit[MAX_APP_THREAD][8];
+uint64_t value_cache_miss[MAX_APP_THREAD][8];
+uint64_t value_cache_hit[MAX_APP_THREAD][8];
 uint64_t latency[MAX_APP_THREAD][LATENCY_WINDOWS];
 
 thread_local CoroCall Tree::worker[define::kMaxCoro];
@@ -26,6 +36,8 @@ thread_local std::queue<uint16_t> hot_wait_queue;
 
 Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
 
+  dsm->getDirectoryAgents()[0]->setTree(this);
+  
   for (int i = 0; i < dsm->getClusterSize(); ++i) {
     local_locks[i] = new LocalLockNode[define::kNumOfLock];
     for (size_t k = 0; k < define::kNumOfLock; ++k) {
@@ -39,18 +51,25 @@ Tree::Tree(DSM *dsm, uint16_t tree_id) : dsm(dsm), tree_id(tree_id) {
   assert(dsm->is_register());
   print_verbose();
 
-  index_cache = new IndexCache(define::kIndexCacheSize);
+  index_cache = new IndexCache(10);
+//  value_cache = new ValueCache(define::kIndexCacheSize);
 
   root_ptr_ptr = get_root_ptr_ptr();
 
   // try to init tree and install root pointer
-  auto page_buffer = (dsm->get_rbuf(0)).get_page_buffer();
-  auto root_addr = dsm->alloc(kLeafPageSize);
-  auto root_page = new (page_buffer) LeafPage;
+  auto page_buffer = (dsm->get_rbuf(0)).get_page_buffer(); // 128kb地址
+  auto root_addr = dsm->alloc(kLeafPageSize);   //1kb
+  auto dynamic_addr = dsm->alloc(kDynamicSize * kLeafCardinality); //1kb
+  auto root_page = new (page_buffer) LeafPage;  // 在128kb空间上创建leafpage对象1kb
 
-  root_page->set_consistent();
+  root_page->set_consistent(); //设置版本号
+  for(int i=0;i<kLeafCardinality;i++){
+    root_page->records[i].Dynamic = GADD(dynamic_addr,i*kDynamicSize);
+  }
+
   dsm->write_sync(page_buffer, root_addr, kLeafPageSize);
 
+  //将root地址（id+offset）写入root_ptr_ptr
   auto cas_buffer = (dsm->get_rbuf(0)).get_cas_buffer();
   bool res = dsm->cas_sync(root_ptr_ptr, 0, root_addr.val, cas_buffer);
   if (res) {
@@ -297,6 +316,31 @@ void Tree::write_page_and_unlock(char *page_buffer, GlobalAddress page_addr,
   releases_local_lock(lock_addr);
 }
 
+void Tree::write_page_and_faa(char *page_buffer, GlobalAddress page_addr,
+                                 int page_size, char *faa_buffer,
+                                 GlobalAddress faa_addr, uint64_t tag,
+                                 CoroContext *cxt, int coro_id, bool async) {
+
+  RdmaOpRegion write_rs;
+  RdmaOpRegion faa_rs;
+  write_rs.source = (uint64_t)page_buffer;
+  write_rs.dest = page_addr;
+  write_rs.size = page_size;
+  write_rs.is_on_chip = false;
+
+  faa_rs.source = (uint64_t)faa_buffer;
+  faa_rs.dest = faa_addr;
+  faa_rs.size = sizeof(uint64_t);
+  faa_rs.is_on_chip = false;
+
+  if (async) {
+    dsm->write_faa(write_rs, faa_rs, 1, false,cxt);
+  } else {
+    dsm->write_faa_sync(write_rs,faa_rs, 1, cxt);
+  }
+ 
+}
+
 void Tree::lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
                               int page_size, uint64_t *cas_buffer,
                               GlobalAddress lock_addr, uint64_t tag,
@@ -401,7 +445,57 @@ next:
 
   leaf_page_store(p, k, v, root, 0, cxt, coro_id);
 }
+void Tree::insert_test(const Key &k, const Value &v, CoroContext *cxt, int coro_id) {
+  assert(dsm->is_register());
 
+  before_operation(cxt, coro_id);
+
+  if (enable_cache) {
+    GlobalAddress cache_addr;
+    auto entry = index_cache->search_from_cache(k, &cache_addr,
+                                                dsm->getMyThreadID() == 0);
+    if (entry) { // cache hit
+      auto root = get_root_ptr(cxt, coro_id);
+      if (leaf_page_store2(cache_addr, k, v, root, 0, cxt, coro_id, true)) {
+
+        cache_hit[dsm->getMyThreadID()][0]++;
+        return;
+      }
+      // cache stale, from root,
+      index_cache->invalidate(entry);
+    }
+    cache_miss[dsm->getMyThreadID()][0]++;
+  }
+
+  auto root = get_root_ptr(cxt, coro_id);
+  SearchResult result;
+
+  GlobalAddress p = root;
+
+next:
+
+  if (!page_search(p, k, result, cxt, coro_id)) {
+    std::cout << "SEARCH WARNING insert" << std::endl;
+    p = get_root_ptr(cxt, coro_id);
+    sleep(1);
+    goto next;
+  }
+
+  if (!result.is_leaf) {
+    assert(result.level != 0);
+    if (result.slibing != GlobalAddress::Null()) {
+      p = result.slibing;
+      goto next;
+    }
+
+    p = result.next_level;
+    if (result.level != 1) {
+      goto next;
+    }
+  }
+
+  leaf_page_store2(p, k, v, root, 0, cxt, coro_id);
+}
 bool Tree::search(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
   assert(dsm->is_register());
 
@@ -455,6 +549,217 @@ next:
     p = result.slibing != GlobalAddress::Null() ? result.slibing
                                                 : result.next_level;
     goto next;
+  }
+}
+
+bool Tree::search_test(const Key &k, Value &v, CoroContext *cxt, int coro_id) {
+   assert(dsm->is_register());
+
+  auto root = get_root_ptr(cxt, coro_id);
+  SearchResult result;
+
+  GlobalAddress p = root;
+
+  bool from_cache = false;
+  const CacheEntry *entry = nullptr;
+
+  
+  if (true){
+    HashMap::const_accessor ca;
+    if (value_cache.find(ca, k)) {
+        // key 存在
+        value_cache_hit[dsm->getMyThreadID()][0]++;
+        v = ca->second;
+        ca.release();
+        return true;
+    } else {
+        // key 不存在
+        value_cache_miss[dsm->getMyThreadID()][0]++;
+    }
+  }
+
+  if (enable_cache) {
+    GlobalAddress cache_addr;
+    entry = index_cache->search_from_cache(k, &cache_addr,
+                                           dsm->getMyThreadID() == 0);
+    if (entry) { // cache hit
+      cache_hit[dsm->getMyThreadID()][0]++;
+      from_cache = true;
+      p = cache_addr;
+
+    } else {
+      cache_miss[dsm->getMyThreadID()][0]++;
+    
+    }
+  }
+
+next:
+  if (!page_search(p, k, result, cxt, coro_id, from_cache)) {
+    if (from_cache) { // cache stale
+      index_cache->invalidate(entry);
+      cache_hit[dsm->getMyThreadID()][0]--;
+      cache_miss[dsm->getMyThreadID()][0]++;
+      from_cache = false;
+
+      p = root;
+    } else {
+      std::cout << "SEARCH WARNING search" << std::endl;
+      sleep(1);
+    }
+    goto next;
+  }
+  if (result.is_leaf) {
+    if (result.val != kValueNull) { // find
+      v = result.val;
+
+      Task task;
+      task.p = p;   
+      task.result = result;
+      task.k = k;
+      task.v = v;
+      task.page_size = 1;
+      task.cxt = cxt;
+      task.coro_id = coro_id;
+
+      pushtask(task);
+      // insert_value_cache(k,v);  // 插入value cache
+      //value_cache_setback(p,result,1,cxt,coro_id); // 将cache信息写回
+      return true;
+    }
+    if (result.slibing != GlobalAddress::Null()) { // turn right
+      p = result.slibing;
+      goto next;
+    }
+    return false; // not found
+  } else {        // internal
+    p = result.slibing != GlobalAddress::Null() ? result.slibing
+                                                : result.next_level;
+    goto next;
+  }
+}
+void Tree::pushtask(Task task){
+    // std::lock_guard<std::mutex> lock(queue_mutex);
+    // task_queue.emplace(task);
+    // queue_condvar.notify_one();
+   task_queue.push(task);
+}
+
+void Tree::insert_value_cache(uint64_t k, uint64_t v) {
+        // 保证原子操作
+  HashMap::accessor a;
+  value_cache.insert(a,{k, v});
+  a.release();
+
+  // if(value_cache.size() > 160000){
+  //   // test
+  //   //invalidation_dir(1,1);
+  //   //
+  //   unsigned long remove_count = static_cast<unsigned long>(0.1 * value_cache.size());
+  //   for(auto it = value_cache.begin(); remove_count > 0 && it != value_cache.end(); ) {
+  //       auto key_to_remove = it->first;
+  //       ++it;  // 注意先递增迭代器，因为删除键可能会使当前迭代器失效
+  //       if (value_cache.erase(key_to_remove)) {
+  //           --remove_count;
+  //       }
+  //   }
+  // }
+}
+void Tree::delete_value_cache(uint64_t k) {
+  value_cache.erase(k);
+//  printf("test\n");
+}
+
+void Tree::invalidation_dir(uint64_t key, int node_id){
+  RawMessage m;
+  m.type = RpcType::INVALIDATION;
+  m.key = key;
+  dsm->rpc_call_dir(m, node_id);
+}
+
+bool Tree::dynamic_cache_policy(GlobalAddress p,SearchResult result, CoroContext *cxt, int coro_id){
+  auto result1 = (dsm->get_rbuf(coro_id)).get_page_buffer();
+  dsm->read_sync(result1, p, 27, cxt);
+  auto meta = (Metadata *)result1;
+  int insert = meta->insert_ts /10000;
+  int last = meta->last_ts /10000;
+  int times = meta->freq;
+
+  if(last != 0){
+    double fre = double(times) / (last - insert);
+    // fre * 1.5  > 1 * 0.2569
+    if(fre * 1.5  > 1 * 0.4569){ 
+     // printf("%f\n",fre);
+      return true;
+    }
+    else {
+//      printf("1");
+      return false;
+    }
+  }else {
+    return true;
+  }
+}
+
+bool Tree::value_cache_setback(GlobalAddress p,SearchResult result,int page_size, CoroContext *cxt, int coro_id) {
+
+  uint64_t lock_index = CityHash64((char *)&p, sizeof(p)) % define::kNumOfLock;
+  GlobalAddress lock_addr;
+  lock_addr.nodeID = p.nodeID;
+  lock_addr.offset = lock_index * sizeof(uint64_t);
+
+  auto cas_buffer = (dsm->get_rbuf(coro_id)).get_cas_buffer();
+  auto page_buffer = (dsm->get_rbuf(coro_id)).get_page_buffer();
+  lock_and_read_page(page_buffer, result.myaddr, 27, cas_buffer,lock_addr, 0,cxt, coro_id);
+  // dsm->read_sync(page_buffer, result.myaddr, 27,cxt);
+  auto page = (LeafEntry *)page_buffer;
+
+  if(page->value == result.val){
+    // GlobalAddress cache_info_addr = GADD(result.myaddr,18);
+    // auto rdma_buffer = (dsm->get_rbuf(coro_id)).get_cacheinfo_buffer();
+    // uint8_t cache_info = result.cache_info | (1 << dsm->getMyNodeID());
+    // *rdma_buffer= cache_info;
+    // dsm->write(rdma_buffer, cache_info_addr, 1, true, cxt);
+
+    auto &r = page->cache_info;
+    r = r | (1 << dsm->getMyNodeID());
+    char *update_addr = (char *)&r;
+    write_page_and_unlock(update_addr,GADD(result.myaddr,(update_addr-(char *)page)),
+                          1,cas_buffer,lock_addr,0,cxt,coro_id,false);
+    // dsm->write(update_addr, GADD(result.myaddr,(update_addr-(char *)page)), 1);
+    return true;
+  }else{
+    //printf("xx");  
+    this->unlock_addr(lock_addr, 0, cas_buffer, cxt, coro_id, true);
+    return false;
+  } 
+  
+  // auto result1 = (dsm->get_rbuf(coro_id)).get_page_buffer();
+  // dsm->read_sync(result1, result.myaddr, 27, cxt);
+  // auto page2 = (LeafEntry *)result1;
+  // printf("x");
+}
+
+void Tree::ThreadTask(){
+  while(true){
+    Task task;
+    // {
+    //   std::unique_lock<std::mutex> lock(queue_mutex);
+    //   queue_condvar.wait(lock, [this] { return !task_queue.empty(); });
+    //   task = task_queue.front();
+    //   task_queue.pop();
+    // }
+    //    insert_value_cache(task.k,task.v);
+    //    value_cache_setback(task.p,task.result,task.page_size,task.cxt,task.coro_id);
+
+    if(task_queue.try_pop(task)) {
+      bool x = 1;
+      x = dynamic_cache_policy(task.result.Dynamic,task.result,task.cxt,task.coro_id);
+      if(x) x = value_cache_setback(task.p,task.result,task.page_size,task.cxt,task.coro_id);
+      if(x) insert_value_cache(task.k,task.v);
+    } else {
+      // 如果队列是空的，那么函数返回 false
+      // 在这里处理无任务可用的情况...
+    }
   }
 }
 
@@ -631,7 +936,7 @@ re_read:
       assert(false);
       return false;
     }
-    leaf_page_search(page, k, result);
+    leaf_page_search(page_addr,page, k, result);
   } else {
     assert(result.level != 0);
     assert(!from_cache);
@@ -684,16 +989,20 @@ void Tree::internal_page_search(InternalPage *page, const Key &k,
   result.next_level = page->records[cnt - 1].ptr;
 }
 
-void Tree::leaf_page_search(LeafPage *page, const Key &k,
+void Tree::leaf_page_search(GlobalAddress page_addr, LeafPage *page, const Key &k,
                             SearchResult &result) {
 
   for (int i = 0; i < kLeafCardinality; ++i) {
     auto &r = page->records[i];
     if (r.key == k && r.value != kValueNull && r.f_version == r.r_version) {
       result.val = r.value;
+      result.myaddr = GADD(page_addr,((char *)&r-(char *)page)); // 计算当前kv对在内存池中的地址
+      result.cache_info = r.cache_info;
+      result.Dynamic = r.Dynamic; 
       break;
     }
   }
+
 }
 
 void Tree::internal_page_store(GlobalAddress page_addr, const Key &k,
@@ -872,19 +1181,38 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   }
   assert(k >= page->hdr.lowest);
 
-  int cnt = 0;
+  auto now = std::chrono::system_clock::now();
+  // 转换为自epoch以来的微秒数
+  auto now_in_micro = std::chrono::time_point_cast<std::chrono::microseconds>(now);
+  // 计算自epoch以来的微秒数
+  auto duration = now_in_micro.time_since_epoch();
+  uint64_t insert_ts = duration.count();
+
+  GlobalAddress dynamic_addr;
+  auto insert_buf = rbuf.get_page_buffer();
+  memcpy(insert_buf, &insert_ts, sizeof(uint64_t));
+  
+  int cnt = 0;  //kv对数量
   int empty_index = -1;
   char *update_addr = nullptr;
   for (int i = 0; i < kLeafCardinality; ++i) {
 
-    auto &r = page->records[i];
+    auto &r = page->records[i];//引用变量
     if (r.value != kValueNull) {
       cnt++;
-      if (r.key == k) {
+      if (r.key == k) { // update
         r.value = v;
         r.f_version++;
         r.r_version = r.f_version;
+        r.cache_info = 0;
         update_addr = (char *)&r;
+        dynamic_addr = r.Dynamic;
+        auto faa_buf = rbuf.get_page_buffer();
+        uint64_t faa = 1;
+        memcpy(faa_buf, &faa, sizeof(uint64_t));
+        write_page_and_faa(insert_buf,GADD(dynamic_addr,8), 8,
+                            faa_buf,GADD(dynamic_addr,16),
+                            tag, cxt, coro_id, true);
         break;
       }
     } else if (empty_index == -1) {
@@ -905,21 +1233,23 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     r.value = v;
     r.f_version++;
     r.r_version = r.f_version;
-
+    r.cache_info = 0;
     update_addr = (char *)&r;
-
     cnt++;
+    dynamic_addr = r.Dynamic;
+    dsm->write(insert_buf, dynamic_addr, 8,false, cxt);
   }
 
+  // 是否分裂（kv对数量达最大）
   bool need_split = cnt == kLeafCardinality;
-  if (!need_split) {
+  if (!need_split) { //不分裂
     assert(update_addr);
     write_page_and_unlock(
         update_addr, GADD(page_addr, (update_addr - (char *)page)),
         sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
 
     return true;
-  } else {
+  } else {  //分裂，对叶子结点排序
     std::sort(
         page->records, page->records + kLeafCardinality,
         [](const LeafEntry &a, const LeafEntry &b) { return a.key < b.key; });
@@ -929,10 +1259,13 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   GlobalAddress sibling_addr;
   if (need_split) { // need split
     sibling_addr = dsm->alloc(kLeafPageSize);
+    GlobalAddress sib_dynamic = dsm->alloc(kLeafPageSize);
     auto sibling_buf = rbuf.get_sibling_buffer();
 
     auto sibling = new (sibling_buf) LeafPage(page->hdr.level);
-
+    for(int i=0;i<kLeafCardinality;i++){
+      sibling->records[i].Dynamic = GADD(sib_dynamic,i*kDynamicSize);
+    }
     // std::cout << "addr " <<  sibling_addr << " | level " <<
     // (int)(page->hdr.level) << std::endl;
 
@@ -942,10 +1275,17 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
     assert(split_key < page->hdr.highest);
 
     for (int i = m; i < cnt; ++i) { // move
+      auto temp = sibling->records[i - m].Dynamic;
+
       sibling->records[i - m].key = page->records[i].key;
       sibling->records[i - m].value = page->records[i].value;
+      sibling->records[i - m].cache_info = page->records[i].cache_info;
+      sibling->records[i - m].Dynamic = page->records[i].Dynamic;
+
       page->records[i].key = 0;
       page->records[i].value = kValueNull;
+      page->records[i].cache_info = 0;
+      page->records[i].Dynamic = temp;
     }
     page->hdr.last_index -= (cnt - m);
     sibling->hdr.last_index += (cnt - m);
@@ -990,6 +1330,215 @@ bool Tree::leaf_page_store(GlobalAddress page_addr, const Key &k,
   return true;
 }
 
+bool Tree::leaf_page_store2(GlobalAddress page_addr, const Key &k,
+                           const Value &v, GlobalAddress root, int level,
+                           CoroContext *cxt, int coro_id, bool from_cache) {
+
+  uint64_t lock_index =
+      CityHash64((char *)&page_addr, sizeof(page_addr)) % define::kNumOfLock;
+
+  GlobalAddress lock_addr;
+
+#ifdef CONFIG_ENABLE_EMBEDDING_LOCK
+  lock_addr = page_addr;
+#else
+  lock_addr.nodeID = page_addr.nodeID;
+  lock_addr.offset = lock_index * sizeof(uint64_t);
+#endif
+
+  auto &rbuf = dsm->get_rbuf(coro_id);
+  uint64_t *cas_buffer = rbuf.get_cas_buffer();
+  auto page_buffer = rbuf.get_page_buffer();
+
+  auto tag = dsm->getThreadTag();
+  assert(tag != 0);
+  lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
+                     lock_addr, tag, cxt, coro_id);
+  auto page = (LeafPage *)page_buffer;
+
+  assert(page->hdr.level == level);
+  assert(page->check_consistent());
+
+  if (from_cache &&
+      (k < page->hdr.lowest || k >= page->hdr.highest)) { // cache is stale
+    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+    return false;
+  }
+
+  if (k >= page->hdr.highest) {
+
+    this->unlock_addr(lock_addr, tag, cas_buffer, cxt, coro_id, true);
+    assert(page->hdr.sibling_ptr != GlobalAddress::Null());
+    this->leaf_page_store(page->hdr.sibling_ptr, k, v, root, level, cxt,
+                          coro_id);
+    return true;
+  }
+  assert(k >= page->hdr.lowest);
+
+
+  auto now = std::chrono::system_clock::now();
+  // 转换为自epoch以来的微秒数
+  auto now_in_micro = std::chrono::time_point_cast<std::chrono::microseconds>(now);
+  // 计算自epoch以来的微秒数
+  auto duration = now_in_micro.time_since_epoch();
+  uint64_t insert_ts = duration.count();
+
+  GlobalAddress dynamic_addr;
+  auto insert_buf = rbuf.get_page_buffer();
+  memcpy(insert_buf, &insert_ts, sizeof(uint64_t));
+
+  int cnt = 0;  //kv对数量
+  int empty_index = -1;
+  char *update_addr = nullptr;
+  for (int i = 0; i < kLeafCardinality; ++i) {
+
+    auto &r = page->records[i];//引用变量
+    if (r.value != kValueNull) {
+      cnt++;
+      if (r.key == k) { // update
+        if(r.cache_info !=0){
+          for(int i=0;i<8;i++){
+            if(r.cache_info & (1<<i)){
+              invalidation_dir(k, i);
+              dsm->rpc_wait();
+            }
+          }
+        }
+        r.value = v;
+        r.f_version++;
+        r.r_version = r.f_version;
+        r.cache_info = 0;
+        update_addr = (char *)&r;
+        dynamic_addr = r.Dynamic;
+        auto faa_buf = rbuf.get_page_buffer();
+        uint64_t faa = 1;
+        memcpy(faa_buf, &faa, sizeof(uint64_t));
+        write_page_and_faa(insert_buf,GADD(dynamic_addr,8), 8,
+                            faa_buf,GADD(dynamic_addr,16),
+                            tag, cxt, coro_id, true);
+        // auto result1 = (dsm->get_rbuf(coro_id)).get_page_buffer();
+        // dsm->read_sync(result1, dynamic_addr, 27, cxt);
+        // auto page2 = (Metadata *)result1;
+        // printf("x");
+        break;
+      }
+    } else if (empty_index == -1) {
+      empty_index = i;
+    }
+  }
+
+  assert(cnt != kLeafCardinality);
+
+  if (update_addr == nullptr) { // insert new item
+    if (empty_index == -1) {
+      printf("%d cnt\n", cnt);
+      assert(false);
+    }
+
+
+    auto &r = page->records[empty_index];
+    r.key = k;
+    r.value = v;
+    r.f_version++;
+    r.r_version = r.f_version;
+    r.cache_info = 0;
+    update_addr = (char *)&r;
+    cnt++;
+    dynamic_addr = r.Dynamic;
+    dsm->write(insert_buf, dynamic_addr, 8,false, cxt);
+    // dsm->write_sync(insert_buf, dynamic_addr, 8,cxt);
+  }
+
+  // 是否分裂（kv对数量达最大）
+  bool need_split = cnt == kLeafCardinality;
+  if (!need_split) { //不分裂
+    assert(update_addr);
+    write_page_and_unlock(
+        update_addr, GADD(page_addr, (update_addr - (char *)page)),
+        sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
+
+    return true;
+  } else {  //分裂，对叶子结点排序
+    std::sort(
+        page->records, page->records + kLeafCardinality,
+        [](const LeafEntry &a, const LeafEntry &b) { return a.key < b.key; });
+  }
+
+  Key split_key;
+  GlobalAddress sibling_addr;
+  if (need_split) { // need split
+    sibling_addr = dsm->alloc(kLeafPageSize);
+    GlobalAddress sib_dynamic = dsm->alloc(kLeafPageSize);
+    auto sibling_buf = rbuf.get_sibling_buffer();
+    auto sibling = new (sibling_buf) LeafPage(page->hdr.level);
+    
+    for(int i=0;i<kLeafCardinality;i++){
+        sibling->records[i].Dynamic = GADD(sib_dynamic,i*kDynamicSize);
+    }
+    // std::cout << "addr " <<  sibling_addr << " | level " <<
+    // (int)(page->hdr.level) << std::endl;
+
+    int m = cnt / 2;
+    split_key = page->records[m].key;
+    assert(split_key > page->hdr.lowest);
+    assert(split_key < page->hdr.highest);
+
+    for (int i = m; i < cnt; ++i) { // move
+      auto temp = sibling->records[i - m].Dynamic;
+
+      sibling->records[i - m].key = page->records[i].key;
+      sibling->records[i - m].value = page->records[i].value;
+      sibling->records[i - m].cache_info = page->records[i].cache_info;
+      sibling->records[i - m].Dynamic = page->records[i].Dynamic;
+
+      page->records[i].key = 0;
+      page->records[i].value = kValueNull;
+      page->records[i].cache_info = 0;
+      page->records[i].Dynamic = temp;
+    }
+    page->hdr.last_index -= (cnt - m);
+    sibling->hdr.last_index += (cnt - m);
+
+    sibling->hdr.lowest = split_key;
+    sibling->hdr.highest = page->hdr.highest;
+    page->hdr.highest = split_key;
+
+    // link
+    sibling->hdr.sibling_ptr = page->hdr.sibling_ptr;
+    page->hdr.sibling_ptr = sibling_addr;
+
+    sibling->set_consistent();
+    dsm->write_sync(sibling_buf, sibling_addr, kLeafPageSize, cxt);
+  }
+
+  page->set_consistent();
+
+  write_page_and_unlock(
+        update_addr, GADD(page_addr, (update_addr - (char *)page)),
+        sizeof(LeafEntry), cas_buffer, lock_addr, tag, cxt, coro_id, false);
+
+  if (!need_split)
+    return true;
+
+  if (root == page_addr) { // update root
+    if (update_new_root(page_addr, split_key, sibling_addr, level + 1, root,
+                        cxt, coro_id)) {
+      return true;
+    }
+  }
+
+  auto up_level = path_stack[coro_id][level + 1];
+
+  if (up_level != GlobalAddress::Null()) {
+    internal_page_store(up_level, split_key, sibling_addr, root, level + 1, cxt,
+                        coro_id);
+  } else {
+    assert(from_cache);
+    insert_internal(split_key, sibling_addr, cxt, coro_id, level + 1);
+  }
+
+  return true;
+}
 bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
                          CoroContext *cxt, int coro_id, bool from_cache) {
   uint64_t lock_index =
@@ -1010,7 +1559,7 @@ bool Tree::leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
 
   auto tag = dsm->getThreadTag();
   assert(tag != 0);
-
+  
   lock_and_read_page(page_buffer, page_addr, kLeafPageSize, cas_buffer,
                      lock_addr, tag, cxt, coro_id);
 
@@ -1181,5 +1730,7 @@ void Tree::clear_statistics() {
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
     cache_hit[i][0] = 0;
     cache_miss[i][0] = 0;
+    value_cache_hit[i][0] = 0;
+    value_cache_miss[i][0] = 0;
   }
 }

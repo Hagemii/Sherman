@@ -32,6 +32,7 @@ public:
 
   // RDMA operations
   // buffer is registered memory
+  void poll_cq1();
   void read(char *buffer, GlobalAddress gaddr, size_t size, bool signal = true,
             CoroContext *ctx = nullptr);
   void read_sync(char *buffer, GlobalAddress gaddr, size_t size,
@@ -59,9 +60,11 @@ public:
 
   void cas(GlobalAddress gaddr, uint64_t equal, uint64_t val,
            uint64_t *rdma_buffer, bool signal = true,
-           CoroContext *ctx = nullptr);
+           CoroContext *ctx = nullptr,
+           uint64_t size = 8);
   bool cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                uint64_t *rdma_buffer, CoroContext *ctx = nullptr);
+                uint64_t *rdma_buffer, CoroContext *ctx = nullptr,
+                uint64_t size = 8);
 
   void cas_read(RdmaOpRegion &cas_ror, RdmaOpRegion &read_ror, uint64_t equal,
                 uint64_t val, bool signal = true, CoroContext *ctx = nullptr);
@@ -167,6 +170,9 @@ private:
   Directory *dirAgent[NR_DIRECTORY];
 
 public:
+  Directory** getDirectoryAgents() {
+    return dirAgent;
+  }
   bool is_register() { return thread_id != -1; }
   void barrier(const std::string &ss) { keeper->barrier(ss); }
 

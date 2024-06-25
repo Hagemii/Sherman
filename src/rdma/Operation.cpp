@@ -286,12 +286,13 @@ bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
 // for RC & UC
 bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
                         uint64_t compare, uint64_t swap, uint32_t lkey,
-                        uint32_t remoteRKey, bool signal, uint64_t wrID) {
+                        uint32_t remoteRKey, bool signal, uint64_t wrID,
+                        uint64_t size) {
   struct ibv_sge sg;
   struct ibv_send_wr wr;
   struct ibv_send_wr *wrBad;
 
-  fillSgeWr(sg, wr, source, 8, lkey);
+  fillSgeWr(sg, wr, source, size, lkey);
 
   wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
 

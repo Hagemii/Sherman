@@ -1,3 +1,6 @@
+#include "Common.h"
+#include "GlobalAddress.h"
+#include <cstdint>
 #if !defined(_TREE_H_)
 #define _TREE_H_
 
@@ -6,7 +9,16 @@
 #include <city.h>
 #include <functional>
 #include <iostream>
-
+#include <unordered_map>
+#include <mutex>
+#include <tbb/concurrent_hash_map.h>
+#include <tbb/concurrent_queue.h>
+#include <future>
+#include <condition_variable>
+#include <thread>
+#include <queue>
+#include <chrono> // 时间
+#include <tbb/parallel_for.h>
 class IndexCache;
 
 struct LocalLockNode {
@@ -28,13 +40,24 @@ public:
 };
 
 using CoroFunc = std::function<RequstGen *(int, DSM *, int)>;
+using HashMap = tbb::concurrent_hash_map<uint64_t, uint64_t>;
 
 struct SearchResult {
   bool is_leaf;
   uint8_t level;
   GlobalAddress slibing;
   GlobalAddress next_level;
+  GlobalAddress myaddr;
+  uint8_t cache_info;
+  GlobalAddress Dynamic;
   Value val;
+};
+
+struct Metadata{
+  uint64_t insert_ts;  // 插入时间戳 insert_ts
+  uint64_t last_ts;    // 最后更新时间戳 last_ts
+  uint64_t freq;       // 访问频率 freq
+ // uint8_t cache;
 };
 
 class InternalPage;
@@ -44,10 +67,32 @@ class Tree {
 public:
   Tree(DSM *dsm, uint16_t tree_id = 0);
 
+  struct Task {
+    GlobalAddress p;
+    SearchResult result;
+    Key k;
+    Value v;
+    int page_size;
+    CoroContext *cxt;
+    int coro_id;
+  };
+  // std::queue<Task> task_queue; // 现在队列中的每个元素是一个Task结构体
+  // std::mutex queue_mutex;
+  // std::condition_variable queue_condvar;
+
+  tbb::concurrent_queue<Task> task_queue;
+  
+
   void insert(const Key &k, const Value &v, CoroContext *cxt = nullptr,
               int coro_id = 0);
+  void insert_test(const Key &k, const Value &v, CoroContext *cxt = nullptr,
+              int coro_id = 0);
+
   bool search(const Key &k, Value &v, CoroContext *cxt = nullptr,
               int coro_id = 0);
+  bool search_test(const Key &k, Value &v, CoroContext *cxt = nullptr,
+              int coro_id = 0);     
+
   void del(const Key &k, CoroContext *cxt = nullptr, int coro_id = 0);
 
   uint64_t range_query(const Key &from, const Key &to, Value *buffer,
@@ -62,6 +107,14 @@ public:
   void index_cache_statistics();
   void clear_statistics();
 
+  void insert_value_cache(uint64_t k, uint64_t v);
+  void delete_value_cache(uint64_t k);
+  void invalidation_dir(uint64_t key, int node_id);
+  bool value_cache_setback(GlobalAddress p,SearchResult result,int page_size, CoroContext *cxt, int coro_id);
+  void pushtask(Task task);
+  void ThreadTask();
+  bool dynamic_cache_policy(GlobalAddress p,SearchResult result, CoroContext *cxt, int coro_id);
+
 private:
   DSM *dsm;
   uint64_t tree_id;
@@ -74,6 +127,8 @@ private:
   LocalLockNode *local_locks[MAX_MACHINE];
 
   IndexCache *index_cache;
+  HashMap value_cache; 
+  std::vector<std::shared_future<void>> futures;
 
   void print_verbose();
 
@@ -101,6 +156,11 @@ private:
                              int page_size, uint64_t *cas_buffer,
                              GlobalAddress lock_addr, uint64_t tag,
                              CoroContext *cxt, int coro_id, bool async);
+  void write_page_and_faa(char *page_buffer, GlobalAddress page_addr,
+                             int page_size, char *faa_buffer,
+                             GlobalAddress faa_addr, uint64_t tag,
+                             CoroContext *cxt, int coro_id, bool async);
+
   void lock_and_read_page(char *page_buffer, GlobalAddress page_addr,
                           int page_size, uint64_t *cas_buffer,
                           GlobalAddress lock_addr, uint64_t tag,
@@ -110,12 +170,15 @@ private:
                    CoroContext *cxt, int coro_id, bool from_cache = false);
   void internal_page_search(InternalPage *page, const Key &k,
                             SearchResult &result);
-  void leaf_page_search(LeafPage *page, const Key &k, SearchResult &result);
+  void leaf_page_search(GlobalAddress page_addr,LeafPage *page, const Key &k, SearchResult &result);
 
   void internal_page_store(GlobalAddress page_addr, const Key &k,
                            GlobalAddress value, GlobalAddress root, int level,
                            CoroContext *cxt, int coro_id);
   bool leaf_page_store(GlobalAddress page_addr, const Key &k, const Value &v,
+                       GlobalAddress root, int level, CoroContext *cxt,
+                       int coro_id, bool from_cache = false);
+  bool leaf_page_store2(GlobalAddress page_addr, const Key &k, const Value &v,
                        GlobalAddress root, int level, CoroContext *cxt,
                        int coro_id, bool from_cache = false);
   bool leaf_page_del(GlobalAddress page_addr, const Key &k, int level,
@@ -173,11 +236,13 @@ public:
 
 class LeafEntry {
 public:
-  uint8_t f_version : 4;
-  Key key;
-  Value value;
-  uint8_t r_version : 4;
-
+  uint8_t f_version : 4;    // 1
+  Key key;  // 8        
+  Value value;// 8
+  uint8_t r_version : 4;    // 1
+  uint8_t cache_info ;  // 缓存信息, 1
+  GlobalAddress Dynamic;  // 用作判断动态缓存策略, 8
+  std::array<uint8_t, 248> value1;
   LeafEntry() {
     f_version = 0;
     r_version = 0;

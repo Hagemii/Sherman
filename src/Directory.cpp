@@ -2,6 +2,7 @@
 #include "Common.h"
 
 #include "Connection.h"
+#include "RawMessageConnection.h"
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
@@ -19,7 +20,7 @@ Directory::Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
     dsm_start.offset = per_directory_dsm_size * dirID;
     chunckAlloc = new GlobalAllocator(dsm_start, per_directory_dsm_size);
   }
-
+  treeptr = nullptr;
   dirTh = new std::thread(&Directory::dirThread, this);
 }
 
@@ -27,7 +28,7 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  bindCore(23 - dirID);
+  bindCore(11 - nodeID);
   Debug::notifyInfo("thread %d in memory nodes runs...\n", dirID);
 
   while (true) {
@@ -81,6 +82,12 @@ void Directory::process_message(const RawMessage *m) {
 
     break;
   }
+  case RpcType::INVALIDATION:{
+    int key = m->key;
+    treeptr->delete_value_cache(key);
+    send = (RawMessage *)dCon->message->getSendPool();
+    break;
+  }
 
   default:
     assert(false);
@@ -89,4 +96,8 @@ void Directory::process_message(const RawMessage *m) {
   if (send) {
     dCon->sendMessage2App(send, m->node_id, m->app_id);
   }
+}
+
+void Directory::setTree(Tree* tree) {
+  treeptr = tree;
 }

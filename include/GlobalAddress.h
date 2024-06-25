@@ -7,7 +7,7 @@
 class GlobalAddress {
 public:
 
-union {
+union {//联合
   struct {
   uint64_t nodeID: 16;
   uint64_t offset : 48;

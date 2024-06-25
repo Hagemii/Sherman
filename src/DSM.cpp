@@ -70,7 +70,7 @@ void DSM::registerThread() {
 
   if (thread_id != -1)
     return;
-
+  
   thread_id = appID.fetch_add(1);
   thread_tag = thread_id + (((uint64_t)this->getMyNodeID()) << 32) + 1;
 
@@ -115,6 +115,10 @@ void DSM::initRDMAConnection() {
   myNodeID = keeper->getMyNodeID();
 }
 
+void DSM::poll_cq1(){
+  ibv_wc wc;
+  pollWithCQ(iCon->cq, 1, &wc);
+}
 void DSM::read(char *buffer, GlobalAddress gaddr, size_t size, bool signal,
                CoroContext *ctx) {
   if (ctx == nullptr) {
@@ -312,25 +316,25 @@ bool DSM::cas_read_sync(RdmaOpRegion &cas_ror, RdmaOpRegion &read_ror,
 }
 
 void DSM::cas(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-              uint64_t *rdma_buffer, bool signal, CoroContext *ctx) {
+              uint64_t *rdma_buffer, bool signal, CoroContext *ctx, uint64_t size) {
 
   if (ctx == nullptr) {
     rdmaCompareAndSwap(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
                        remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, equal,
                        val, iCon->cacheLKey,
-                       remoteInfo[gaddr.nodeID].dsmRKey[0], signal);
+                       remoteInfo[gaddr.nodeID].dsmRKey[0], signal,0,size);
   } else {
     rdmaCompareAndSwap(iCon->data[0][gaddr.nodeID], (uint64_t)rdma_buffer,
                        remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, equal,
                        val, iCon->cacheLKey,
-                       remoteInfo[gaddr.nodeID].dsmRKey[0], true, ctx->coro_id);
+                       remoteInfo[gaddr.nodeID].dsmRKey[0], true, ctx->coro_id,size);
     (*ctx->yield)(*ctx->master);
   }
 }
 
 bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
-                   uint64_t *rdma_buffer, CoroContext *ctx) {
-  cas(gaddr, equal, val, rdma_buffer, true, ctx);
+                   uint64_t *rdma_buffer, CoroContext *ctx, uint64_t size) {
+  cas(gaddr, equal, val, rdma_buffer, true, ctx, size);
 
   if (ctx == nullptr) {
     ibv_wc wc;

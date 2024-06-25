@@ -4,6 +4,7 @@
 #include "AbstractMessageConnection.h"
 #include "GlobalAddress.h"
 
+#include <sys/types.h>
 #include <thread>
 
 enum RpcType : uint8_t {
@@ -11,6 +12,7 @@ enum RpcType : uint8_t {
   FREE,
   NEW_ROOT,
   NOP,
+  INVALIDATION,
 };
 
 struct RawMessage {
@@ -21,6 +23,7 @@ struct RawMessage {
 
   GlobalAddress addr; // for malloc
   int level;
+  uint64_t key;
 } __attribute__((packed));
 
 class RawMessageConnection : public AbstractMessageConnection {

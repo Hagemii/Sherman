@@ -17,7 +17,7 @@ DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,void *onc
   // dsm memory
   this->dsmPool = dsmPool;
   this->dsmSize = dsmSize;
-  this->dsmMR = createMemoryRegion((uint64_t)dsmPool, dsmSize, &ctx);
+  this->dsmMR = createMemoryRegion((uint64_t)this->dsmPool, dsmSize, &ctx);
   this->dsmLKey = dsmMR->lkey;
 
   // on-chip lock memory

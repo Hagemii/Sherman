@@ -4,6 +4,7 @@
 #include "ScrambledZipfGenerator.h" // Scalestore的zipf数据生成器
 
 #include <city.h>
+#include <cstdio>
 #include <stdlib.h>
 #include <thread>
 #include <time.h>
@@ -19,7 +20,7 @@ const int kCoroCnt = 3;
 int kReadRatio;
 int kThreadCount;
 int kNodeCount;
-uint64_t kKeySpace = 1 * define::MB;
+uint64_t kKeySpace = 3 * define::MB;
 double kWarmRatio = 0.8;
 double zipfan = 0.99;
 
@@ -50,13 +51,12 @@ std::atomic<int64_t> warmup_cnt{0};
 std::atomic_bool ready{false};
 void thread_run(int id) {
 
-  bindCore(id);
-
+ 
   dsm->registerThread();
 
   uint64_t all_thread = kThreadCount * dsm->getClusterSize();
   uint64_t my_id = kThreadCount * dsm->getMyNodeID() + id;
-
+  bindCore(my_id);
   printf("I am thread %ld on compute nodes\n", my_id);
 
   if (id == 0) {
@@ -103,6 +103,8 @@ void thread_run(int id) {
   
 
   Timer timer;
+  timespec s, e;
+  clock_gettime(CLOCK_REALTIME, &s);
   while (true) {
     uint64_t dis = zipf_random.rand();
   
@@ -111,11 +113,22 @@ void thread_run(int id) {
     Value v;
     timer.begin();
 
+ 
+    clock_gettime(CLOCK_REALTIME, &e);
+    int timex = (e.tv_sec - s.tv_sec);
+    if(timex < 60) {
+      kReadRatio = 50;
+    }else if(timex >= 60 && timex < 120) {
+      kReadRatio = 95;
+    }else if(timex >= 120 && timex < 180) {
+      kReadRatio = 100;
+    }
+
     if (rand_r(&seed) % 100 < kReadRatio) { // GET
       tree->search_test(key, v);
     } else {
       v = 12;
-      tree->insert(key, v);
+      tree->insert_test(key, v);
     }
 
     auto us_10 = timer.end() / 100;
@@ -125,9 +138,15 @@ void thread_run(int id) {
     latency[id][us_10]++;
 
     tp[id][0]++;
+
   }
 #endif
 
+}
+void threadrun_task(){
+  bindCore(11 - 1 * dsm->getMyNodeID() - kNodeCount );
+  dsm->registerThread();
+  tree->ThreadTask();
 }
 
 void parse_args(int argc, char *argv[]) {
@@ -188,8 +207,7 @@ void cal_latency() {
   }
 }
 
-int main(int argc, char *argv[]) {
-
+int singleThreadCorrectnessTest(int argc, char *argv[]) {
   parse_args(argc, argv);
 
   DSMConfig config;
@@ -200,7 +218,40 @@ int main(int argc, char *argv[]) {
   tree = new Tree(dsm);
 
   if (dsm->getMyNodeID() == 0) {
+
     for (uint64_t i = 1; i < 1024000; ++i) {
+      tree->insert(i, i * 2);
+    }
+
+    for (uint64_t i = 1; i < 1024000; ++i) {
+      Value v;
+      tree->search(i, v);
+      if (v != i * 2) {
+        std::cout << "i:" << i << "  v:" << v << std::endl;
+      }
+      assert(v == i * 2);
+    }
+  }
+
+  dsm->barrier("benchmark");
+  dsm->resetThread();
+
+  return 0;
+}
+
+int main(int argc, char *argv[]) {
+  // singleThreadCorrectnessTest(argc, argv);
+  parse_args(argc, argv);
+
+  DSMConfig config;
+  config.machineNR = kNodeCount;
+  dsm = DSM::getInstance(config);
+
+  dsm->registerThread();
+  tree = new Tree(dsm);
+
+  if (dsm->getMyNodeID() == 0) {
+    for (uint64_t i = 1; i < 1000240; ++i) {
       tree->insert(to_key(i), i * 2);
     }
   }
@@ -211,6 +262,8 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < kThreadCount; i++) {
     th[i] = std::thread(thread_run, i);
   }
+ 
+  std::thread task(threadrun_task); 
 
   while (!ready.load())
     ;
@@ -254,17 +307,18 @@ int main(int argc, char *argv[]) {
 
     clock_gettime(CLOCK_REALTIME, &s);
 
-    if (++count % 3 == 0 && dsm->getMyNodeID() == 0) {
+    if (++count % 10 == 0 && dsm->getMyNodeID() == 0) {
       cal_latency();
+ 
     }
 
     double per_node_tp = cap * 1.0 / microseconds;
-    uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
+    uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 10000));
 
     printf("%d, throughput %.4f\n", dsm->getMyNodeID(), per_node_tp);
 
     if (dsm->getMyNodeID() == 0) {
-      printf("cluster throughput %.3f\n", cluster_tp / 1000.0);
+      printf("cluster throughput %.4f\n", cluster_tp / 10000.0);
       printf("index_cache hit rate: %lf\n", hit * 1.0 / all);
       printf("index_cache miss rate: %lf\n", miss * 1.0 / all);
       printf("value_cache hit rate: %lf\n", value_hit * 1.0 / value_all);

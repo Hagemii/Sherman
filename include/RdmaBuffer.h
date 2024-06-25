@@ -7,9 +7,10 @@
 class RdmaBuffer {
 
 private:
-  static const int kPageBufferCnt = 8;    // async, buffer safty
+  static const int kPageBufferCnt = 32;    // async, buffer safty
   static const int kSiblingBufferCnt = 8; // async, buffer safty
-  static const int kCasBufferCnt = 8;     // async, buffer safty
+  static const int kCasBufferCnt = 32;     // async, buffer safty
+  static const int kCacheBufferCnt = 8;     // async, buffer safty
 
   char *buffer;
 
